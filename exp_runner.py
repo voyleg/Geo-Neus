@@ -1,32 +1,32 @@
-import os
-import time
-import logging
-import argparse
-import numpy as np
-import cv2 as cv
-import trimesh
-import torch
-import torch.nn.functional as F
-from torch.utils.tensorboard import SummaryWriter
-from shutil import copyfile
-from icecream import ic
-from tqdm import tqdm
-from pyhocon import ConfigFactory
-from models.dataset import Dataset
-from models.fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, NeRF
-from models.renderer import GeoNeuSRenderer, get_psnr
-# from plyfile import PlyData, PlyElement
-from models import mesh_filtering
-from torch.autograd import gradcheck
-from skimage import morphology as morph
-import pandas as pd
 from pathlib import Path
+from shutil import copyfile
+import argparse
+import os
+
+from pyhocon import ConfigFactory
+import cv2 as cv
+import torch.nn.functional as F
+from skimage import morphology as morph
+import numpy as np
+import pandas as pd
+from torch.utils.tensorboard import SummaryWriter
+import torch
+from tqdm import tqdm
+import trimesh
+
+from models.dataset import Dataset
+from models.renderer import GeoNeuSRenderer, get_psnr
+from utils.logger import logger
+from models import mesh_filtering
+from models.fields import NeRF, RenderingNetwork, SDFNetwork, SingleVarianceNetwork
 
 torch.cuda.manual_seed(2022)
 torch.manual_seed(2022)
 
+
 class Runner:
     def __init__(self, conf_path, mode='train', case='CASE_NAME', is_continue=False, checkpoint=False, suffix=''):
+        'Init Runner' >> logger.debug
         self.device = torch.device('cuda')
 
         # Configuration
@@ -40,10 +40,8 @@ class Runner:
         f.close()
 
         self.conf = ConfigFactory.parse_string(conf_text)
-        self.conf['dataset.data_dir'] = self.conf['dataset.data_dir'].replace('CASE_NAME', case)
         self.base_exp_dir = self.conf['general.base_exp_dir']
         os.makedirs(self.base_exp_dir, exist_ok=True)
-        self.dataset = Dataset(self.conf['dataset'])
         self.iter_step = 0
 
         # Training parameters
@@ -67,6 +65,8 @@ class Runner:
         self.mode = mode
         self.model_list = []
         self.writer = None
+
+        self.dataset = Dataset(self.conf['dataset'], use_masks=self.mask_weight != 0)
 
         # Networks
         params_to_train = []
@@ -107,7 +107,7 @@ class Runner:
             latest_model_name = model_list[-1]
 
         if latest_model_name is not None:
-            logging.info('Find checkpoint: {}'.format(latest_model_name))
+            'Find checkpoint: {}'.format(latest_model_name) >> logger.info
             self.load_checkpoint(latest_model_name)
 
         # Backup codes and configs for debug
@@ -115,6 +115,7 @@ class Runner:
             self.file_backup()
 
     def train(self):
+        'Start training' >> logger.debug
         self.writer = SummaryWriter(log_dir=os.path.join(self.base_exp_dir, 'logs'))
         self.update_learning_rate()
         res_step = self.end_iter - self.iter_step
@@ -177,7 +178,6 @@ class Runner:
                    sdf_loss +\
                    ncc_loss
 
-
             self.optimizer.zero_grad()
             loss.backward()
 
@@ -196,10 +196,10 @@ class Runner:
             self.writer.add_scalar('Statistics/psnr', psnr, self.iter_step)
 
             if self.iter_step % self.report_freq == 0:
-                print(self.base_exp_dir)
-                print('iter:{:8>d} loss = {} color_loss={} eikonal_loss={} sdf_loss={} ncc_loss={} psnr={} lr={}'.format(
-                    self.iter_step, loss, color_fine_loss, eikonal_loss,
-                    sdf_loss, ncc_loss, psnr, self.optimizer.param_groups[0]['lr']))
+                msg = (f'iter {self.iter_step:7>} | loss {loss:6.3f} | color_loss {color_fine_loss:6.3f}'
+                       f' | eikonal_loss {eikonal_loss:6.3f} | sdf_loss {sdf_loss:6.3f} | ncc_loss {ncc_loss:6.3f}'
+                       f' | psnr {psnr:6.3f} | lr {self.optimizer.param_groups[0]["lr"]:.2e}')
+                msg >> logger.info
 
             if self.iter_step % self.save_freq == 0:
                 self.save_checkpoint()
@@ -258,7 +258,7 @@ class Runner:
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         self.iter_step = checkpoint['iter_step']
 
-        logging.info('End')
+        'End' >> logger.info
 
     def save_checkpoint(self):
         checkpoint = {
@@ -277,7 +277,7 @@ class Runner:
         if idx < 0:
             idx = np.random.randint(self.dataset.n_images)
 
-        print('Validate: iter: {}, camera: {}'.format(self.iter_step, idx))
+        'Validate: iter: {}, camera: {}'.format(self.iter_step, idx) >> logger.info
 
         if resolution_level < 0:
             resolution_level = self.validate_resolution_level
@@ -365,7 +365,6 @@ class Runner:
                                         'ncc_costs',
                                         '{:0>8d}_{}_{}.png'.format(self.iter_step, i, idx)), (255 * ncc_cost[..., i] / 2.0).astype(np.uint8))
 
-
     def eval_image(self, resolution_level=1):
         img_fine_dir = os.path.join(self.base_exp_dir, 'img_fine')
         if not os.path.exists(img_fine_dir):
@@ -425,7 +424,6 @@ class Runner:
         psnrs = np.concatenate([psnrs, psnrs.mean()[None], psnrs.std()[None]])
         pd.DataFrame(psnrs).to_csv('{}/psnr.csv'.format(evaldir))
 
-
     def render_novel_image(self, idx_0, idx_1, ratio, resolution_level):
         """
         Interpolate view between two cameras.
@@ -468,7 +466,7 @@ class Runner:
         mesh = trimesh.Trimesh(vertices, triangles)
         mesh.export(os.path.join(self.base_exp_dir, 'meshes', '{:0>8d}.ply'.format(self.iter_step)))
 
-        logging.info('End')
+        'End' >> logger.info
 
     def validate_mesh(self, world_space=False, resolution=64, threshold=0.0, dilation=15):
         torch.set_default_dtype(torch.float32)
@@ -527,7 +525,7 @@ class Runner:
 
         mesh.export(os.path.join(self.base_exp_dir, 'meshes', f'output_mesh{self.suffix}.ply'))
 
-        logging.info('End')
+        'End' >> logger.info
 
     def validate_mesh_womask(self, world_space=False, resolution=64, threshold=0.0, dilation=15):
         bound_min = torch.tensor(self.dataset.object_bbox_min, dtype=torch.float32)
@@ -586,7 +584,7 @@ class Runner:
         mesh = trimesh.Trimesh(vertices, triangles)
         mesh.export(os.path.join(self.base_exp_dir, 'meshes', f'output_mesh{self.suffix}.ply'))
 
-        logging.info('End')
+        'End' >> logger.info
 
     def interpolate_view(self, img_idx_0, img_idx_1):
         images = []
@@ -615,12 +613,7 @@ class Runner:
 
 
 if __name__ == '__main__':
-    print('Hello Wooden')
-
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
-
-    FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
-    logging.basicConfig(level=logging.DEBUG, format=FORMAT)
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--conf', type=str, default='./confs/base.conf')

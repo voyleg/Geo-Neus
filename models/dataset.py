@@ -1,20 +1,14 @@
-import torch
-import torch.nn.functional as F
+from glob import glob
+import os
+
 import cv2 as cv
 import numpy as np
-import os
-from glob import glob
-from icecream import ic
 from scipy.spatial.transform import Rotation as Rot
 from scipy.spatial.transform import Slerp
-from PIL import Image
-import matplotlib.pyplot as plt
-import re
-import open3d as o3d
-import struct
-import collections
+import torch
+
 from models.read_write_model import *
-# from plyfile import PlyData, PlyElement
+from utils.logger import logger
 
 
 # This function is borrowed from IDR: https://github.com/lioryariv/idr
@@ -41,10 +35,11 @@ def load_K_Rt_from_P(filename, P=None):
 
     return intrinsics, pose
 
+
 class Dataset:
-    def __init__(self, conf):
+    def __init__(self, conf, use_masks=True):
         super(Dataset, self).__init__()
-        print('Load data: Begin')
+        'Init dataset' >> logger.debug
         self.device = torch.device('cuda')
         self.conf = conf
 
@@ -53,20 +48,30 @@ class Dataset:
         self.object_cameras_name = conf.get_string('object_cameras_name')
 
         num_views = conf.get_string('n_views')
-        self.generator = torch.Generator(device='cuda')
-        self.generator.manual_seed(np.random.randint(1e9))
 
         self.camera_outside_sphere = conf.get_bool('camera_outside_sphere', default=True)
         self.scale_mat_scale = conf.get_float('scale_mat_scale', default=1.1)
 
+        'Load render cameras' >> logger.debug
         camera_dict = np.load(os.path.join(self.data_dir, self.render_cameras_name))
         self.camera_dict = camera_dict
+
+        'Load images' >> logger.debug
         self.images_lis = sorted(glob(os.path.join(self.data_dir, 'image/*.png')))
         self.n_images = len(self.images_lis)
         self.images_np = np.stack([cv.imread(im_name) for im_name in self.images_lis]) / 256.0
-        self.images_gray_np = np.stack([cv.imread(im_name, cv.IMREAD_GRAYSCALE) for im_name in self.images_lis]) / 255.0  # Read grayscale images
-        self.masks_lis = sorted(glob(os.path.join(self.data_dir, 'mask/*.png')))
-        self.masks_np = np.stack([cv.imread(im_name) for im_name in self.masks_lis]) / 256.0
+
+        'Load grayscale images' >> logger.debug
+        self.images_gray_np = np.stack([cv.imread(im_name, cv.IMREAD_GRAYSCALE) for im_name in self.images_lis]) / 255.0
+
+        if use_masks:
+            'Load masks' >> logger.debug
+            self.masks_lis = sorted(glob(os.path.join(self.data_dir, 'mask/*.png')))
+            self.masks_np = np.stack([cv.imread(im_name) for im_name in self.masks_lis]) / 256.0
+        else:
+            'Make filled masks' >> logger.debug
+            self.masks_np = np.ones([], dtype=self.images_np.dtype)
+            self.masks_np = np.broadcast_to(self.masks_np, self.images_np.shape)
 
         # world_mat is a projection matrix from world to image
         self.world_mats_np = [camera_dict['world_mat_%d' % idx].astype(np.float32) for idx in range(self.n_images)]
@@ -88,7 +93,12 @@ class Dataset:
 
         self.images = torch.from_numpy(self.images_np.astype(np.float32))  # [n_images, H, W, 3]
         self.images_gray = torch.from_numpy(self.images_gray_np.astype(np.float32)).cuda()
-        self.masks  = torch.from_numpy(self.masks_np.astype(np.float32))   # [n_images, H, W, 3]
+
+        if use_masks:
+            self.masks = torch.from_numpy(self.masks_np.astype(np.float32))   # [n_images, H, W, 3]
+        else:
+            self.masks = torch.ones([], dtype=torch.float32, device='cpu').broadcast_to(self.images.shape)
+
         self.intrinsics_all = torch.stack(self.intrinsics_all).to(self.device)   # [n_images, 4, 4]
         self.intrinsics_all_inv = torch.inverse(self.intrinsics_all)  # [n_images, 4, 4]
         self.focal = self.intrinsics_all[0][0, 0]
@@ -96,15 +106,20 @@ class Dataset:
         self.H, self.W = self.images.shape[1], self.images.shape[2]
         self.image_pixels = self.H * self.W
 
+        'Load guidance points' >> logger.debug
         pts_dir = os.path.join(self.data_dir, 'sfm_pts/points.npy')
-        view_id_dir = os.path.join(self.data_dir, 'sfm_pts/view_id.npy')
         self.pts = torch.from_numpy(np.load(pts_dir)).cuda()
+
+        'Load point ids' >> logger.debug
+        view_id_dir = os.path.join(self.data_dir, 'sfm_pts/view_id.npy')
         self.pts_view_id = np.load(view_id_dir, allow_pickle=True)
 
+        'Load object cameras' >> logger.debug
+        object_scale_mat = np.load(os.path.join(self.data_dir, self.object_cameras_name))['scale_mat_0']
+
+        # Object scale mat: region of interest to **extract mesh**
         object_bbox_min = np.array([-1.01, -1.01, -1.01, 1.0])
         object_bbox_max = np.array([ 1.01,  1.01,  1.01, 1.0])
-        # Object scale mat: region of interest to **extract mesh**
-        object_scale_mat = np.load(os.path.join(self.data_dir, self.object_cameras_name))['scale_mat_0']
         object_bbox_min = np.linalg.inv(self.scale_mats_np[0]) @ object_scale_mat @ object_bbox_min[:, None]
         object_bbox_max = np.linalg.inv(self.scale_mats_np[0]) @ object_scale_mat @ object_bbox_max[:, None]
         self.object_bbox_min = object_bbox_min[:3, 0]
@@ -114,6 +129,8 @@ class Dataset:
             self.num_views = self.n_images - 1
         else:
             self.num_views = int(num_views) - 1
+
+        'Load pairs' >> logger.debug
         with open(os.path.join(self.data_dir, "pairs.txt")) as f:
             pairs = f.readlines()
 
@@ -123,7 +140,7 @@ class Dataset:
             fun = lambda s: int(s.split(".")[0])
             self.src_idx.append(torch.tensor(list(map(fun, splitted))))
 
-        print('Load data: End')
+        'Init dataset END' >> logger.debug
 
     def gen_rays_at(self, img_idx, resolution_level=1):
         """
