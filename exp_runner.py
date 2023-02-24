@@ -20,9 +20,6 @@ from utils.logger import logger
 from models import mesh_filtering
 from models.fields import NeRF, RenderingNetwork, SDFNetwork, SingleVarianceNetwork
 
-torch.cuda.manual_seed(2022)
-torch.manual_seed(2022)
-
 
 class Runner:
     def __init__(self, conf_path, mode='train', case='CASE_NAME', is_continue=False, checkpoint=False, suffix=''):
@@ -612,7 +609,19 @@ class Runner:
         writer.release()
 
 
+def seed_everything(seed):
+    # os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    # torch.backends.cudnn.benchmark = False
+    # torch.backends.cudnn.deterministic = True
+    # torch.use_deterministic_algorithms(True, warn_only=True)
+
+
 if __name__ == '__main__':
+    seed_everything(2022)
+
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
     parser = argparse.ArgumentParser()
