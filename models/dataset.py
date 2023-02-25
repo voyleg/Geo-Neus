@@ -47,8 +47,6 @@ class Dataset:
         self.render_cameras_name = conf.get_string('render_cameras_name')
         self.object_cameras_name = conf.get_string('object_cameras_name')
 
-        num_views = conf.get_string('n_views')
-
         self.camera_outside_sphere = conf.get_bool('camera_outside_sphere', default=True)
         self.scale_mat_scale = conf.get_float('scale_mat_scale', default=1.1)
 
@@ -69,9 +67,7 @@ class Dataset:
             self.masks_lis = sorted(glob(os.path.join(self.data_dir, 'mask/*.png')))
             self.masks_np = np.stack([cv.imread(im_name) for im_name in self.masks_lis]) / 256.0
         else:
-            'Make filled masks' >> logger.debug
-            self.masks_np = np.ones([], dtype=self.images_np.dtype)
-            self.masks_np = np.broadcast_to(self.masks_np, self.images_np.shape)
+            self.masks = None
 
         # world_mat is a projection matrix from world to image
         self.world_mats_np = [camera_dict['world_mat_%d' % idx].astype(np.float32) for idx in range(self.n_images)]
@@ -96,8 +92,6 @@ class Dataset:
 
         if use_masks:
             self.masks = torch.from_numpy(self.masks_np.astype(np.float32))   # [n_images, H, W, 3]
-        else:
-            self.masks = torch.ones([], dtype=torch.float32, device='cpu').broadcast_to(self.images.shape)
 
         self.intrinsics_all = torch.stack(self.intrinsics_all).to(self.device)   # [n_images, 4, 4]
         self.intrinsics_all_inv = torch.inverse(self.intrinsics_all)  # [n_images, 4, 4]
@@ -125,11 +119,6 @@ class Dataset:
         self.object_bbox_min = object_bbox_min[:3, 0]
         self.object_bbox_max = object_bbox_max[:3, 0]
 
-        if num_views == 'max':
-            self.num_views = self.n_images - 1
-        else:
-            self.num_views = int(num_views) - 1
-
         'Load pairs' >> logger.debug
         with open(os.path.join(self.data_dir, "pairs.txt")) as f:
             pairs = f.readlines()
@@ -140,7 +129,9 @@ class Dataset:
             fun = lambda s: int(s.split(".")[0])
             self.src_idx.append(torch.tensor(list(map(fun, splitted))))
 
-        'Init dataset END' >> logger.debug
+        self.roi_boxes = [camera_dict['roi_box_%d' % idx] for idx in range(self.n_images)]
+        self.sample_roi_prob = conf.get_float('sample_roi_prob', default=0.0)
+        assert 0.0 <= self.sample_roi_prob <= 1.0
 
     def gen_rays_at(self, img_idx, resolution_level=1):
         """
@@ -169,7 +160,7 @@ class Dataset:
         rays_o = self.pose_all[img_idx, None, None, :3, 3].expand(rays_v.shape)  # W, H, 3
         return rays_o.transpose(0, 1), rays_v.transpose(0, 1), intrinsics_pair, intrinsics_inv_pair, poses_pair, images_gray_pair
 
-    def gen_random_rays_at(self, img_idx, batch_size):
+    def gen_random_rays_at(self, img_idx, batch_size, roi_padding=10):
         """
         Generate random rays at world space from one camera.
         """
@@ -184,10 +175,37 @@ class Dataset:
         intrinsics_inv_pair = self.intrinsics_all_inv[idx_list]
         images_gray_pair = self.images_gray[idx_list]
 
-        pixels_x = torch.randint(low=0, high=self.W, size=[batch_size])
-        pixels_y = torch.randint(low=0, high=self.H, size=[batch_size])
+        if self.sample_roi_prob == 0.0:
+            pixels_x = torch.randint(low=0, high=self.W, size=[batch_size])
+            pixels_y = torch.randint(low=0, high=self.H, size=[batch_size])
+        else:
+            left, right, top, bottom = self.roi_boxes[img_idx]
+            left, right = max(0, left - roi_padding), min(self.W, right + roi_padding)
+            top, bottom = max(0, top - roi_padding), min(self.H, bottom + roi_padding)
+
+            # sample rays inside the region of interest
+            pixels_x = torch.empty(batch_size, dtype=torch.long)
+            pixels_y = torch.empty(batch_size, dtype=torch.long)
+
+            roi_rays_n = int(batch_size * self.sample_roi_prob)
+            torch.randint(low=left, high=right, size=[roi_rays_n], out=pixels_x[:roi_rays_n])
+            torch.randint(low=top, high=bottom, size=[roi_rays_n], out=pixels_y[:roi_rays_n])
+
+            # sample rays outside the (square donut-like) region of interest
+            all_pix_y, all_pix_x = torch.meshgrid(torch.arange(self.H), torch.arange(self.W))
+            is_out_of_roi = ((top > all_pix_y).logical_or_(all_pix_y >= bottom)
+                             .logical_or_(left > all_pix_x).logical_or_(all_pix_x >= right))
+            oor_y = all_pix_y.masked_select(is_out_of_roi); del all_pix_y
+            oor_x = all_pix_x.masked_select(is_out_of_roi); del all_pix_x, is_out_of_roi
+            oor_ray_ids = torch.randint(low=0, high=len(oor_x), size=[batch_size - roi_rays_n])
+            pixels_x[roi_rays_n:] = oor_x[oor_ray_ids]; del oor_x
+            pixels_y[roi_rays_n:] = oor_y[oor_ray_ids]; del oor_y, oor_ray_ids
+
         color = self.images[img_idx][(pixels_y, pixels_x)]    # batch_size, 3
-        mask = self.masks[img_idx][(pixels_y, pixels_x)]      # batch_size, 3
+        if self.masks is not None:
+            mask = self.masks[img_idx][(pixels_y, pixels_x)]      # batch_size, 3
+        else:
+            mask = color.new_tensor(255 / 256).broadcast_to(color.shape)
         p = torch.stack([pixels_x, pixels_y, torch.ones_like(pixels_y)], dim=-1).float()  # batch_size, 3
         p = torch.matmul(self.intrinsics_all_inv[img_idx, None, :3, :3], p[:, :, None]).squeeze() # batch_size, 3
         rays_v = p / torch.linalg.norm(p, ord=2, dim=-1, keepdim=True)    # batch_size, 3

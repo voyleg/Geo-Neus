@@ -54,6 +54,7 @@ class Runner:
         self.use_white_bkgd = self.conf.get_bool('train.use_white_bkgd')
         self.warm_up_end = self.conf.get_float('train.warm_up_end', default=0.0)
         self.anneal_end = self.conf.get_float('train.anneal_end', default=0.0)
+        self.val_img_i = self.conf.get_int('train.val_img_i', default=-1)
 
         # Weights
         self.igr_weight = self.conf.get_float('train.igr_weight')
@@ -203,7 +204,7 @@ class Runner:
 
             if self.iter_step % self.val_freq == 0:
                 np.random.seed(iter_i)  # seed
-                self.validate_image()
+                self.validate_image(self.val_img_i)
 
             # if self.iter_step % self.val_mesh_freq == 0:
             #     self.validate_mesh()
@@ -484,7 +485,7 @@ class Runner:
         
         K = self.dataset.intrinsics_all
         pose = self.dataset.pose_all
-        masks = self.dataset.masks_np
+        masks = self.dataset.masks_np  # OV: we set masks=None if they are not available, so won't work
 
 
         masks = [masks[i, :, :, 0].squeeze() for i in range(masks.shape[0])]
@@ -541,7 +542,7 @@ class Runner:
         dilation_radius = dilation
         K = self.dataset.intrinsics_all
         pose = self.dataset.pose_all
-        masks = self.dataset.masks_np
+        masks = self.dataset.masks_np  # OV: we set masks=None if they are not available, so won't work
         masks = [masks[i, :, :, 0].squeeze() for i in range(masks.shape[0])]
 
         print("dilation...")

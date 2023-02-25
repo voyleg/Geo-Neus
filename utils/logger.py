@@ -22,7 +22,7 @@ class Logger(logging.Logger):
 
     @property
     def formatter(self):
-        return logging.Formatter(fmt='%(asctime)s %(levelname)-s %(filename)s:%(lineno)d  %(message)s')
+        return logging.Formatter(fmt='%(asctime)s %(levelname).1s %(filename)s:%(lineno)d  %(message)s')
 
     def add_logfile(self, file, loglevel):
         file_handler = logging.FileHandler(file)
