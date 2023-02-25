@@ -647,8 +647,8 @@ if __name__ == '__main__':
         runner.validate_mesh(world_space=True, resolution=512, threshold=args.mcube_threshold, dilation=args.dilation) # 512
     # elif args.mode == 'validate_mesh_womask':
     #     runner.validate_mesh_womask(world_space=True, resolution=512, threshold=args.mcube_threshold, dilation=args.dilation) # 512
-    # elif args.mode == 'validate_mesh_ori':
-    #     runner.validate_mesh_ori(world_space=True, resolution=512, threshold=args.mcube_threshold) # 512
+    elif args.mode == 'validate_mesh_ori':
+        runner.validate_mesh_ori(world_space=True, resolution=512, threshold=args.mcube_threshold) # 512
     elif args.mode == 'validate_image':
         runner.validate_image()
     elif args.mode == 'eval_image':
