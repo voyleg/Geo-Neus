@@ -1,1 +1,0 @@
-python exp_runner.py --mode validate_mesh_ori --conf ./confs/womask.conf --case $1 --is_continue
