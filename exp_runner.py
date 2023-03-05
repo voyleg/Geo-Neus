@@ -55,6 +55,7 @@ class Runner:
         self.warm_up_end = self.conf.get_float('train.warm_up_end', default=0.0)
         self.anneal_end = self.conf.get_float('train.anneal_end', default=0.0)
         self.val_img_i = self.conf.get_int('train.val_img_i', default=-1)
+        self.sdf_guidance_samples_n = self.conf.get_int('train.sdf_guidance_samples_n', default=None)
 
         # Weights
         self.igr_weight = self.conf.get_float('train.igr_weight')
@@ -64,6 +65,10 @@ class Runner:
         self.model_list = []
         self.writer = None
 
+        # Random
+        self.seeds = np.random.randint(0, 2**32 - 1, [self.end_iter])
+
+        # Dataset
         self.dataset = Dataset(self.conf['dataset'], use_masks=self.mask_weight != 0)
 
         # Networks
@@ -116,12 +121,13 @@ class Runner:
         'Start training' >> logger.debug
         self.writer = SummaryWriter(log_dir=os.path.join(self.base_exp_dir, 'logs'))
         self.update_learning_rate()
-        res_step = self.end_iter - self.iter_step
         image_perm = self.get_image_perm()
 
-        for iter_i in tqdm(range(res_step)):
-            torch.cuda.manual_seed(iter_i)
-            torch.manual_seed(iter_i)
+        for iter_i in tqdm(range(self.iter_step, self.end_iter)):
+            seed = self.seeds[iter_i]
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+
             data, intrinsic, intrinsic_inv, pose, image_gray = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
 
             rays_o, rays_d, true_rgb, mask = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10]
@@ -143,8 +149,7 @@ class Runner:
 
             img_idx_d = self.iter_step % len(image_perm)
 
-
-            pts_view = self.dataset.gen_pts_view(img_idx_d)
+            pts_view = self.dataset.gen_pts_view(img_idx_d, self.sdf_guidance_samples_n)
             pts2sdf = self.renderer.sdf_network.sdf(pts_view)
 
             color_fine = render_out['color_fine']
@@ -203,7 +208,6 @@ class Runner:
                 self.save_checkpoint()
 
             if self.iter_step % self.val_freq == 0:
-                np.random.seed(iter_i)  # seed
                 self.validate_image(self.val_img_i)
 
             # if self.iter_step % self.val_mesh_freq == 0:
@@ -614,7 +618,6 @@ def seed_everything(seed):
     # os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
     # torch.backends.cudnn.benchmark = False
     # torch.backends.cudnn.deterministic = True
     # torch.use_deterministic_algorithms(True, warn_only=True)

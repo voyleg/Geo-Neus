@@ -258,7 +258,9 @@ class Dataset:
         img = cv.imread(self.images_lis[idx])
         return (cv.resize(img, (self.W // resolution_level, self.H // resolution_level))).clip(0, 255)
 
-    def gen_pts_view(self, img_idx):
+    def gen_pts_view(self, img_idx, max_samples_n=None):
         pts_view_id = self.pts_view_id[img_idx]
+        if (max_samples_n is not None) and (len(pts_view_id) > max_samples_n):
+            pts_view_id = np.random.choice(pts_view_id, max_samples_n, replace=False)
         pts_view = self.pts[pts_view_id]
         return pts_view
