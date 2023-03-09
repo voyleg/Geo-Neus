@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from torch.utils.tensorboard import SummaryWriter
 import torch
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import trimesh
 
 from models.dataset import Dataset
@@ -122,17 +122,15 @@ class Runner:
     def train(self):
         'Start training' >> logger.debug
         self.writer = SummaryWriter(log_dir=os.path.join(self.base_exp_dir, 'logs'))
-        self.update_learning_rate()
-        image_perm = self.get_image_perm()
 
-        for iter_i in tqdm(range(self.iter_step, self.end_iter)):
-            seed = self.seeds[iter_i]
-            np.random.seed(seed)
-            torch.manual_seed(seed)
+        for iter_i in tqdm(range(self.iter_step, self.end_iter), initial=self.iter_step, total=self.end_iter):
+            seed_everything(self.seeds[iter_i])
+            img_i = np.random.randint(2 ** 63) % self.dataset.n_images
 
-            data, intrinsic, intrinsic_inv, pose, image_gray = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
+            self.update_learning_rate()
 
-            rays_o, rays_d, true_rgb, mask = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10]
+            data, intrinsic, intrinsic_inv, pose, image_gray = self.dataset.gen_random_rays_at(img_i, self.batch_size)
+            rays_o, rays_d, true_rgb, mask = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10]; del data
             near, far = self.dataset.near_far_from_sphere(rays_o, rays_d)
 
             background_rgb = None
@@ -143,16 +141,12 @@ class Runner:
                 mask = (mask > 0.5).float()
             else:
                 mask = torch.ones_like(mask)
-
             mask_sum = mask.sum() + 1e-5
-            render_out = self.renderer.render(rays_o, rays_d, near, far,
-                                              background_rgb=background_rgb,
-                                              cos_anneal_ratio=self.get_cos_anneal_ratio(), intrinsics=intrinsic, intrinsics_inv=intrinsic_inv, poses=pose, images=image_gray)
 
-            img_idx_d = self.iter_step % len(image_perm)
-
-            pts_view = self.dataset.gen_pts_view(img_idx_d, self.sdf_guidance_samples_n)
-            pts2sdf = self.renderer.sdf_network.sdf(pts_view)
+            render_out = self.renderer.render(
+                rays_o, rays_d, near, far, background_rgb=background_rgb, cos_anneal_ratio=self.get_cos_anneal_ratio(),
+                intrinsics=intrinsic, intrinsics_inv=intrinsic_inv, poses=pose, images=image_gray
+            ); del rays_o, rays_d, near, far, background_rgb, intrinsic, intrinsic_inv, pose, image_gray
 
             color_fine = render_out['color_fine']
             s_val = render_out['s_val']
@@ -161,34 +155,25 @@ class Runner:
             weight_max = render_out['weight_max']
             weight_sum = render_out['weight_sum']
             ncc_cost = render_out['ncc_cost']
-            inside_sphere = render_out['mid_inside_sphere']
+            inside_sphere = render_out['mid_inside_sphere']; del render_out
+
+            pts_view = self.dataset.gen_pts_view(img_i, self.sdf_guidance_samples_n)
+            pts2sdf = self.renderer.sdf_network.sdf(pts_view)
 
             # Loss
             color_error = (color_fine - true_rgb) * mask
             color_fine_loss = F.l1_loss(color_error, torch.zeros_like(color_error), reduction='sum') / mask_sum
-            psnr = 20.0 * torch.log10(1.0 / (((color_fine - true_rgb)**2 * mask).sum() / (mask_sum * 3.0)).sqrt())
-
             eikonal_loss = gradient_error
-
             mask_loss = F.binary_cross_entropy(weight_sum.clip(1e-3, 1.0 - 1e-3), mask)
-
-            sdf_loss = F.l1_loss(pts2sdf, torch.zeros_like(pts2sdf),
-                                   reduction='sum') / pts2sdf.shape[0]
-
+            sdf_loss = F.l1_loss(pts2sdf, torch.zeros_like(pts2sdf), reduction='sum') / pts2sdf.shape[0]
             ncc_loss = 0.5 * (ncc_cost.sum(dim=0) / (inside_sphere.sum(dim=0) + 1e-8)).squeeze(-1)
-
-            loss = color_fine_loss +\
-                   eikonal_loss * self.igr_weight +\
-                   mask_loss * self.mask_weight +\
-                   sdf_loss +\
-                   ncc_loss
+            loss = color_fine_loss + eikonal_loss * self.igr_weight + mask_loss * self.mask_weight + sdf_loss + ncc_loss
 
             self.optimizer.zero_grad()
             loss.backward()
-
             self.optimizer.step()
 
-            self.iter_step += 1
+            psnr = 20.0 * torch.log10(1.0 / (((color_fine - true_rgb)**2 * mask).sum() / (mask_sum * 3.0)).sqrt())
 
             self.writer.add_scalar('Loss/loss', loss, self.iter_step)
             self.writer.add_scalar('Loss/color_loss', color_fine_loss, self.iter_step)
@@ -206,6 +191,7 @@ class Runner:
                        f' | psnr {psnr:6.3f} | lr {self.optimizer.param_groups[0]["lr"]:.2e}')
                 msg >> logger.info
 
+            self.iter_step += 1
             if self.iter_step % self.save_freq == 0:
                 self.save_checkpoint()
 
@@ -214,14 +200,6 @@ class Runner:
 
             # if self.iter_step % self.val_mesh_freq == 0:
             #     self.validate_mesh()
-
-            self.update_learning_rate()
-
-            if self.iter_step % len(image_perm) == 0:
-                image_perm = self.get_image_perm()
-
-    def get_image_perm(self):
-        return torch.randperm(self.dataset.n_images)
 
     def get_cos_anneal_ratio(self):
         if self.anneal_end == 0.0:

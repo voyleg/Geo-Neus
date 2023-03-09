@@ -315,7 +315,7 @@ class GeoNeuSRenderer:
         z_vals_sdf0 = torch.where(z_vals_sdf0 > max_z_val, torch.zeros_like(z_vals_sdf0), z_vals_sdf0)
         pts_sdf0 = rays_o[:, None, :] + rays_d[:, None, :] * z_vals_sdf0[..., :, None]  # [batch_size, 1, 3]
         gradients_sdf0 = sdf_network.gradient(pts_sdf0.reshape(-1, 3)).squeeze().reshape(batch_size, 1, 3)
-        gradients_sdf0 = gradients_sdf0 / torch.linalg.norm(gradients_sdf0, ord=2, dim=-1, keepdim=True)
+        gradients_sdf0 = torch.nn.functional.normalize(gradients_sdf0, dim=-1)
         gradients_sdf0 = torch.matmul(poses[0, :3, :3].permute(1, 0)[None, ...], gradients_sdf0.permute(0, 2, 1)).permute(0, 2, 1).detach()
 
         project_xyz = torch.matmul(poses[0, :3, :3].permute(1, 0), pts_sdf0.permute(0, 2, 1))

@@ -168,7 +168,7 @@ class Dataset:
         src_idx = self.src_idx[img_idx]
         src_idx = src_idx[:9]
         # src_idx = src_idx[-9:]
-        idx_list = torch.cat([img_idx.clone().detach().unsqueeze(0), src_idx], dim=0).cuda()
+        idx_list = torch.cat([src_idx.new_tensor([img_idx]), src_idx], dim=0).cuda()
 
         poses_pair = self.pose_all[idx_list]  # [store R^-1 and C]
         intrinsics_pair = self.intrinsics_all[idx_list]
