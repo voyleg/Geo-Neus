@@ -66,6 +66,8 @@ class Runner:
         self.writer = None
 
         # Random
+        seed = self.conf.get_int('general.seed', default=2022)
+        seed_everything(seed)
         self.seeds = np.random.randint(0, 2**32 - 1, [self.end_iter])
 
         # Dataset
@@ -624,8 +626,6 @@ def seed_everything(seed):
 
 
 if __name__ == '__main__':
-    seed_everything(2022)
-
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
     parser = argparse.ArgumentParser()
